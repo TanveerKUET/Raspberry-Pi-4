@@ -1,5 +1,5 @@
-# Raspberry-Pi-4
-Step by step guidelines to install Raspberry Pi OS on Raspberry Pi 4 B device
+# Raspberry-Pi-4 remote Access
+Step by step guidelines to remotely access Raspberry Pi 4 OS from your Laptop
 
 1.	Turn on your WiFi mobile hotspot in your PC
 2.	Rename your SSID as TANVEER PhD CoE
