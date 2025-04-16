@@ -1,0 +1,3 @@
+C:\Users\Engr. Tanveer>scp KDDTest+.csv tanveer@raspberrypi1:/home/tanveer/Desktop
+tanveer@raspberrypi1's password:
+KDDTest+.csv                                                                          100% 2600KB   5.1MB/s   00:00
