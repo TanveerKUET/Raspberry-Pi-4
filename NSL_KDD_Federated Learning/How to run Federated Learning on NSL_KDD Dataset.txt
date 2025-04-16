@@ -1,0 +1,236 @@
+# ==============================
+# File: common/preprocess.py
+# ==============================
+
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder, MinMaxScaler
+from sklearn.model_selection import train_test_split
+
+COLUMN_NAMES = [
+    'duration','protocol_type','service','flag','src_bytes','dst_bytes','land','wrong_fragment','urgent',
+    'hot','num_failed_logins','logged_in','num_compromised','root_shell','su_attempted','num_root',
+    'num_file_creations','num_shells','num_access_files','num_outbound_cmds','is_host_login','is_guest_login',
+    'count','srv_count','serror_rate','srv_serror_rate','rerror_rate','srv_rerror_rate','same_srv_rate',
+    'diff_srv_rate','srv_diff_host_rate','dst_host_count','dst_host_srv_count','dst_host_same_srv_rate',
+    'dst_host_diff_srv_rate','dst_host_same_src_port_rate','dst_host_srv_diff_host_rate','dst_host_serror_rate',
+    'dst_host_srv_serror_rate','dst_host_rerror_rate','dst_host_srv_rerror_rate','labels'
+]
+
+def load_data(train_file='data/KDDTrain+.txt', test_file='data/KDDTest+.txt'):
+    def preprocess(df):
+        categorical_cols = ['protocol_type', 'service', 'flag']
+        for col in categorical_cols:
+            le = LabelEncoder()
+            df[col] = le.fit_transform(df[col])
+        df['labels'] = df['labels'].apply(lambda x: 0 if x == 'normal' else 1)
+        feature_cols = df.columns.difference(['labels'])
+        scaler = MinMaxScaler()
+        df[feature_cols] = scaler.fit_transform(df[feature_cols])
+        X = df.drop('labels', axis=1)
+        y = df['labels']
+        return X, y
+
+    train_df = pd.read_csv(train_file, names=COLUMN_NAMES, skiprows=1)
+    test_df = pd.read_csv(test_file, names=COLUMN_NAMES, skiprows=1)
+    X_train, y_train = preprocess(train_df)
+    X_test, y_test = preprocess(test_df)
+    return X_train, X_test, y_train, y_test
+
+
+# ==============================
+# File: client/client.py
+# ==============================
+
+import requests
+import time
+import joblib
+import tensorflow as tf
+import numpy as np
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from common.preprocess import load_data
+
+SERVER_URL = 'http://<AGGREGATOR_IP>:5000'  # Replace with actual aggregator IP
+
+
+def build_model(input_dim):
+    model = tf.keras.Sequential([
+        tf.keras.layers.Dense(64, activation='relu', input_shape=(input_dim,)),
+        tf.keras.layers.Dense(32, activation='relu'),
+        tf.keras.layers.Dense(1, activation='sigmoid')
+    ])
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
+
+
+def get_global_weights():
+    res = requests.get(f'{SERVER_URL}/global')
+    with open("temp_global.pkl", "wb") as f:
+        f.write(res.content)
+    with open("temp_global.pkl", "rb") as f:
+        return joblib.load(f)
+
+
+def send_weights(weights):
+    with open("temp_weights.pkl", "wb") as f:
+        joblib.dump(weights, f)
+    with open("temp_weights.pkl", "rb") as f:
+        requests.post(f'{SERVER_URL}/upload', data=f.read())
+
+
+if __name__ == '__main__':
+    X_train, _, y_train, _ = load_data()
+    model = build_model(X_train.shape[1])
+
+    for round_num in range(1, 11):
+        print(f"\n[Client] Round {round_num} started")
+
+        # Get global weights
+        try:
+            global_weights = get_global_weights()
+            model.set_weights(global_weights)
+            print("[Client] Received global weights")
+        except Exception as e:
+            print(f"[Client] Waiting for global weights: {e}")
+            time.sleep(5)
+            continue
+
+        # Local training
+        model.fit(X_train, y_train, epochs=1, batch_size=32, verbose=1)
+
+        # Send updated weights to aggregator
+        updated_weights = model.get_weights()
+        send_weights(updated_weights)
+        print("[Client] Sent updated weights to aggregator")
+
+        # Optional pause
+        time.sleep(5)
+
+
+# ==============================
+# File: aggregator/aggregator.py
+# ==============================
+
+import os
+import joblib
+import numpy as np
+import tensorflow as tf
+from flask import Flask, request, send_file
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from common.preprocess import load_data
+
+app = Flask(__name__)
+
+weights_buffer = []
+ROUND = 0
+
+X_train, X_test, y_train, y_test = load_data()
+model = tf.keras.Sequential([
+    tf.keras.layers.Dense(64, activation='relu', input_shape=(X_train.shape[1],)),
+    tf.keras.layers.Dense(32, activation='relu'),
+    tf.keras.layers.Dense(1, activation='sigmoid')
+])
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+
+def aggregate(weights_list):
+    avg_weights = list()
+    for weights in zip(*weights_list):
+        avg_weights.append(np.mean(weights, axis=0))
+    return avg_weights
+
+@app.route('/upload', methods=['POST'])
+def upload_weights():
+    global weights_buffer
+    weights = joblib.load(request.data)
+    weights_buffer.append(weights)
+    print(f"[Aggregator] Received weights: {len(weights_buffer)}")
+
+    # Proceed to aggregate after receiving from all clients (example: 3 clients)
+    if len(weights_buffer) >= 3:
+        global ROUND
+        aggregated_weights = aggregate(weights_buffer)
+        model.set_weights(aggregated_weights)
+
+        # Evaluate
+        loss, accuracy = model.evaluate(X_test, y_test, verbose=0)
+        y_pred = (model.predict(X_test) > 0.5).astype(int)
+        cm = confusion_matrix(y_test, y_pred)
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+        disp.plot()
+        os.makedirs("aggregator/logs", exist_ok=True)
+        plt.savefig(f"aggregator/logs/confusion_round_{ROUND}.png")
+        plt.close()
+
+        with open(f"aggregator/logs/metrics_round_{ROUND}.txt", "w") as f:
+            f.write(f"Round {ROUND}: Loss={loss:.4f}, Accuracy={accuracy:.4f}\n")
+
+        weights_buffer = []
+        ROUND += 1
+    return "OK"
+
+@app.route('/global', methods=['GET'])
+def send_global():
+    joblib.dump(model.get_weights(), 'global_weights.pkl')
+    return send_file('global_weights.pkl', as_attachment=True)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+
+
+# ==============================
+# File: README.md
+# ==============================
+
+# Federated Learning with NSL-KDD Dataset on Raspberry Pi
+
+## Project Structure
+
+```bash
+.
+├── aggregator
+│   ├── aggregator.py
+│   └── logs/
+├── client
+│   └── client.py
+├── common
+│   └── preprocess.py
+├── data
+│   ├── KDDTrain+.txt
+│   └── KDDTest+.txt
+└── README.md
+```
+
+## Instructions
+
+1. **Prepare Raspberry Pi Devices**
+   - Set up Python environment with dependencies (TensorFlow, Flask, scikit-learn, joblib).
+
+2. **Aggregator Setup**
+   - Run the aggregator server:
+     ```bash
+     python aggregator.py
+     ```
+
+3. **Client Setup**
+   - Set the correct `SERVER_URL` in `client.py` with your aggregator IP.
+   - Run `client/client.py` on each Raspberry Pi client.
+
+4. **Logs and Metrics**
+   - Metrics saved per round in `aggregator/logs/metrics_round_<n>.txt`
+   - Confusion matrix saved as `aggregator/logs/confusion_round_<n>.png`
+
+## Notes
+- Each client trains locally and sends updates.
+- Aggregator averages updates, evaluates, and distributes new global weights.
+- Make sure the `data` folder is present on all clients and aggregator.
+
+## Requirements
+```bash
+pip install tensorflow flask scikit-learn matplotlib joblib
+```
+
+---
+
+You can monitor training progress by inspecting `aggregator/logs` folder or building a dashboard on top of this setup.
