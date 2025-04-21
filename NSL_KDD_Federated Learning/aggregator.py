@@ -7,8 +7,6 @@ import joblib
 import numpy as np
 import tensorflow as tf
 from flask import Flask, request, send_file
-import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 from preprocess import load_data
