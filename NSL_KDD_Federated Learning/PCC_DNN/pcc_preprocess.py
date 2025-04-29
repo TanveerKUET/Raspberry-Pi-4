@@ -34,7 +34,8 @@ def load_data(train_file='KDDTrain+.csv', test_file='KDDTest+.csv', return_featu
             correlations = df.corr(method='pearson')['labels'].drop('labels')
             correlations_sorted = correlations.abs().sort_values(ascending=False)
 
-            thresholds = [0.009, 0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
+            #thresholds = [0.009, 0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
+            thresholds = [0.009]
             best_accuracy = 0
             best_features = []
             best_threshold = None
